@@ -47,6 +47,21 @@ impl Contract {
     pub fn pending_admin(env: Env) -> Option<Address> {
         storage::get_pending_admin(&env)
     }
+
+    /// Rotate the single relay signer immediately (no timelock).
+    ///
+    /// Admin-gated via the shared `require_admin` helper. Persists `new_signer`
+    /// so `relay_signer()` returns it right away and `register_callback`
+    /// authenticates against the updated value. Emits `EventRelaySignerRotated`
+    /// carrying the old and new signer addresses on every successful call,
+    /// including no-op rotations to the currently-active signer.
+    pub fn set_relay_signer(env: Env, new_signer: Address) -> Result<(), AdminError> {
+        admin::require_admin(&env)?;
+        let old_signer = storage::get_relay_signer(&env);
+        storage::set_relay_signer(&env, &new_signer);
+        events::relay_signer_rotated(&env, &old_signer, &new_signer);
+        Ok(())
+    }
 }
 
 // Re-export the admin error type for callers.

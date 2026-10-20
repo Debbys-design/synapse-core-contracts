@@ -51,3 +51,21 @@ pub fn admin(env: &Env) -> Address {
 pub fn pending_admin(env: &Env) -> Option<Address> {
     storage::get_pending_admin(env)
 }
+
+/// Rotate the single relay signer immediately (no timelock).
+///
+/// Admin-gated baseline rotation path for the single-signer trust model in
+/// `docs/adr/0001-relay-signer-trust-model.md`. The new signer takes effect
+/// immediately: `relay_signer()` returns it and `register_callback`
+/// authenticates against it right away. Rotating to the currently-active
+/// signer is a no-op on state but still succeeds and still emits the event.
+///
+/// # Panics
+/// Panics if the current admin has not authorized the call.
+pub fn set_relay_signer(env: &Env, new_signer: Address) {
+    let current_admin = storage::get_admin(env);
+    current_admin.require_auth();
+    let old_signer = storage::get_relay_signer(env);
+    storage::set_relay_signer(env, &new_signer);
+    events::emit_relay_signer_rotated(env, &old_signer, &new_signer);
+}
