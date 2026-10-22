@@ -1,71 +1,100 @@
-//! Two-step admin transfer per `docs/adr/0002-two-step-admin-transfer.md`.
+//! Shared role-based access-control helpers.
 //!
-//! A direct, single-call admin transfer is a known footgun: a typo'd address
-//! permanently locks the contract. The two-step flow requires the proposed
-//! admin to explicitly accept before the transfer is finalized.
+//! Every admin-gated entry point delegates here instead of reimplementing its
+//! own `require_auth()` logic. One helper per *shape* of check:
+//!
+//! - [`require_admin`] — admin only.
+//! - [`require_relay_or_admin`] — relay signer or admin.
+//! - [`require_pending_admin`] — the two-step admin transfer's pending admin.
+//! - [`require_guardian`] — the emergency guardian (ADR-0004).
+//!
+//! The helpers take already-loaded [`Address`] values so they carry no
+//! storage-tier assumptions; callers read the stored identities via
+//! `storage.rs` and pass them in. Ordering is preserved: the caller is
+//! authenticated first (`require_auth()`), then compared against the stored
+//! identity, so an unauthenticated caller fails at the SDK boundary and an
+//! authenticated-but-wrong caller fails with
+//! [`ContractError::NotAuthorized`].
 
 use soroban_sdk::{Address, Env};
 
-use crate::events;
-use crate::storage;
+use crate::errors::ContractError;
 
-/// Propose a new admin. Only the current admin may call this.
+/// Requires that `caller` is the stored `admin`.
 ///
-/// Stores `new_admin` as the pending admin, overwriting any prior pending
-/// proposal (proposals do not stack). The transfer is not finalized until
-/// `accept_admin` is called by the pending admin.
-///
-/// # Panics
-/// Panics if the current admin has not authorized the call.
-pub fn propose_admin(env: &Env, new_admin: Address) {
-    let current = storage::get_admin(env);
-    current.require_auth();
-    storage::set_pending_admin(env, &new_admin);
-}
-
-/// Accept a pending admin transfer. Only the stored pending admin may call this.
-///
-/// Finalizes the transfer by promoting the pending admin to admin and clearing
-/// the pending slot. Emits the `admin` topic event on finalization.
-///
-/// # Panics
-/// Panics if there is no pending admin or if `caller` is not the pending admin.
-/// State is not mutated on rejection.
-pub fn accept_admin(env: &Env, caller: Address) {
+/// Authenticates `caller` via `require_auth()` and then compares it against
+/// `admin`. Returns [`ContractError::NotAuthorized`] when the caller is
+/// authenticated but is not the admin.
+pub fn require_admin(env: &Env, caller: &Address, admin: &Address) -> Result<(), ContractError> {
     caller.require_auth();
-    let pending = storage::get_pending_admin(env).expect("no pending admin");
-    if caller != pending {
-        panic!("caller is not the pending admin");
+    if caller != admin {
+        return Err(ContractError::NotAuthorized);
     }
-    storage::set_admin(env, &pending);
-    storage::clear_pending_admin(env);
-    events::emit_admin(env, &pending);
+    let _ = env;
+    Ok(())
 }
 
-/// Return the current admin address.
-pub fn admin(env: &Env) -> Address {
-    storage::get_admin(env)
-}
-
-/// Return the pending admin address, if a transfer is in progress.
-pub fn pending_admin(env: &Env) -> Option<Address> {
-    storage::get_pending_admin(env)
-}
-
-/// Rotate the single relay signer immediately (no timelock).
+/// Requires that `caller` is either the stored `relay_signer` or the `admin`.
 ///
-/// Admin-gated baseline rotation path for the single-signer trust model in
-/// `docs/adr/0001-relay-signer-trust-model.md`. The new signer takes effect
-/// immediately: `relay_signer()` returns it and `register_callback`
-/// authenticates against it right away. Rotating to the currently-active
-/// signer is a no-op on state but still succeeds and still emits the event.
+/// Authenticates `caller` exactly once via `require_auth()`, then accepts the
+/// call if the caller matches either identity. A caller that is both admin and
+/// relay signer passes exactly once. Returns [`ContractError::NotAuthorized`]
+/// when the caller is authenticated but matches neither identity.
+pub fn require_relay_or_admin(
+    env: &Env,
+    caller: &Address,
+    admin: &Address,
+    relay_signer: &Address,
+) -> Result<(), ContractError> {
+    caller.require_auth();
+    if caller != admin && caller != relay_signer {
+        return Err(ContractError::NotAuthorized);
+    }
+    let _ = env;
+    Ok(())
+}
+
+/// Requires that `caller` is the stored `pending_admin`.
 ///
-/// # Panics
-/// Panics if the current admin has not authorized the call.
-pub fn set_relay_signer(env: &Env, new_signer: Address) {
-    let current_admin = storage::get_admin(env);
-    current_admin.require_auth();
-    let old_signer = storage::get_relay_signer(env);
-    storage::set_relay_signer(env, &new_signer);
-    events::emit_relay_signer_rotated(env, &old_signer, &new_signer);
+/// Used by the two-step admin transfer's accept step. Authenticates `caller`
+/// via `require_auth()` and then compares it against `pending_admin`. Returns
+/// [`ContractError::NotAuthorized`] when the caller is authenticated but is not
+/// the pending admin.
+pub fn require_pending_admin(
+    env: &Env,
+    caller: &Address,
+    pending_admin: &Address,
+) -> Result<(), ContractError> {
+    caller.require_auth();
+    if caller != pending_admin {
+        return Err(ContractError::NotAuthorized);
+    }
+    let _ = env;
+    Ok(())
+}
+
+/// Requires that `caller` is the stored emergency `guardian`.
+///
+/// Used by the guardian emergency admin revocation entry point described in
+/// `docs/adr/0004-guardian-emergency-admin-revocation.md`. Authenticates
+/// `caller` via `require_auth()` and then compares it against `guardian`.
+/// Returns [`ContractError::NotAuthorized`] when the caller is authenticated
+/// but is not the guardian.
+///
+/// The guardian role is deliberately narrow: it can only *revoke/replace* the
+/// admin in an emergency, never grant itself unrelated admin powers. This
+/// helper only proves the caller is the guardian; the entry point that uses it
+/// is responsible for restricting the action to revocation.
+pub fn require_guardian(
+    env: &Env,
+    caller: &Address,
+    guardian: &Address,
+) -> Result<(), ContractError> {
+    caller.require_auth();
+    if caller != guardian {
+        return Err(ContractError::NotAuthorized);
+    }
+    let _ = env;
+    Ok(())
+}
 }
